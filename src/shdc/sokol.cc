@@ -439,6 +439,108 @@ static void write_shader_desc_init(const char* indent, const program_t& prog, co
     L("{}desc.label = \"{}{}_shader\";\n", indent, mod_prefix(inp), prog.name);
 }
 
+static void write_reflection_for_source(const input_t& inp, const spirvcross_t& spirvcross, const program_t& prog, const spirvcross_source_t& source, const char* shader_type) {
+    L("const sg_shader_refl* {}{}_refl_{}(void) {{\n", mod_prefix(inp), prog.name, shader_type);
+
+    const auto& refl = source.refl;
+    L("    static sg_shader_refl refl;\n");
+    L("    static bool valid = false;\n");
+    L("    if (valid) return &refl;\n");
+    L("    valid = true;\n");
+    L("    refl.entry_point = \"{}\";\n", refl.entry_point);
+    L("    refl.stage = (sg_shader_stage){};\n", refl.stage);
+
+    size_t i;
+    for (i = 0; i < refl.inputs.size(); ++i) {
+        const attr_t& attr = refl.inputs[i];
+        if (attr.slot < 0) {
+            break;;
+        }
+
+        L("    refl.inputs[{}].slot = {};\n", i, attr.slot);
+        L("    refl.inputs[{}].name = \"{}\";\n", i, attr.name);
+        L("    refl.inputs[{}].sem_name = \"{}\";\n", i, attr.sem_name);
+        L("    refl.inputs[{}].sem_index = {};\n", i, attr.sem_index);
+    }
+    if (i < attr_t::NUM) {
+        L("    refl.inputs[{}].slot = -1;\n", i);
+    }
+
+    for (i = 0; i < refl.outputs.size(); ++i) {
+        const attr_t& attr = refl.outputs[i];
+        if (attr.slot < 0) {
+            break;;
+        }
+
+        L("    refl.outputs[{}].slot = {};\n", i, attr.slot);
+        L("    refl.outputs[{}].name = \"{}\";\n", i, attr.name);
+        L("    refl.outputs[{}].sem_name = \"{}\";\n", i, attr.sem_name);
+        L("    refl.outputs[{}].sem_index = {};\n", i, attr.sem_index);
+    }
+    if (i < attr_t::NUM) {
+        L("    refl.outputs[{}].slot = -1;\n", i);
+    }
+
+    for (i = 0; i < refl.uniform_blocks.size(); ++i) {
+        const uniform_block_t& block = refl.uniform_blocks[i];
+        if (block.slot < 0) {
+            continue;
+        }
+
+        L("    refl.uniform_blocks[{}].slot = {};\n", i, block.slot);
+        L("    refl.uniform_blocks[{}].size = {};\n", i, block.size);
+        L("    refl.uniform_blocks[{}].name = \"{}\";\n", i, block.name);
+        size_t j;
+        for (j = 0; j < block.uniforms.size(); ++j) {
+            const uniform_t& uniform = block.uniforms[j];
+            L("    refl.uniform_blocks[{}].uniforms[{}].name = \"{}\";\n", i, j, uniform.name);
+            L("    refl.uniform_blocks[{}].uniforms[{}].type = (sg_uniform_type){};\n", i, j, uniform.type);
+            L("    refl.uniform_blocks[{}].uniforms[{}].array_count = {};\n", i, j, uniform.array_count);
+            L("    refl.uniform_blocks[{}].uniforms[{}].offset = {};\n", i, j, uniform.offset);
+        }
+        if (j < uniform_t::NUM) {
+            L("    refl.uniform_blocks[{}].uniforms[{}].offset = -1;\n", i, j);
+        }
+    }
+    if (i < uniform_block_t::NUM) {
+        L("    refl.uniform_blocks[{}].slot = -1;\n", i);
+    }
+
+    for (i = 0; i < refl.images.size(); ++i) {
+        const image_t& image = refl.images[i];
+        if (image.slot < 0) {
+            continue;
+        }
+
+        L("    refl.images[{}].slot = {};\n", i, image.slot);
+        L("    refl.images[{}].name = \"{}\";\n", i, image.name);
+        L("    refl.images[{}].type = (sg_image_type){};\n", i, image.type);
+        L("    refl.images[{}].sampler_type = (sg_sampler_type){};\n", i, image.base_type);
+    }
+    if (i < image_t::NUM) {
+        L("    refl.images[{}].slot = -1;\n", i);
+    }
+
+    L("    return &refl;\n");
+    L("}}\n\n");
+}
+
+static void write_reflection(const input_t& inp, const spirvcross_t& spirvcross) {
+    for (const auto& item: inp.programs) {
+        const program_t& prog = item.second;
+        int vs_snippet_index = inp.snippet_map.at(prog.vs_name);
+        int fs_snippet_index = inp.snippet_map.at(prog.fs_name);
+        int vs_src_index = spirvcross.find_source_by_snippet_index(vs_snippet_index);
+        int fs_src_index = spirvcross.find_source_by_snippet_index(fs_snippet_index);
+        assert((vs_src_index >= 0) && (fs_src_index >= 0));
+        const spirvcross_source_t& vs_src = spirvcross.sources[vs_src_index];
+        const spirvcross_source_t& fs_src = spirvcross.sources[fs_src_index];
+
+        write_reflection_for_source(inp, spirvcross, prog, vs_src, "vs");
+        write_reflection_for_source(inp, spirvcross, prog, fs_src, "fs");
+    }
+}
+
 errmsg_t sokol_t::gen(const args_t& args, const input_t& inp,
                      const std::array<spirvcross_t,slang_t::NUM>& spirvcross,
                      const std::array<bytecode_t,slang_t::NUM>& bytecode)
@@ -452,6 +554,7 @@ errmsg_t sokol_t::gen(const args_t& args, const input_t& inp,
     bool comment_header_written = false;
     bool common_decls_written = false;
     bool guard_written = false;
+    std::map<std::string, bool> reflection_written_for_backend;
     for (int i = 0; i < slang_t::NUM; i++) {
         slang_t::type_t slang = (slang_t::type_t) i;
         if (args.slang & slang_t::bit(slang)) {
@@ -481,6 +584,8 @@ errmsg_t sokol_t::gen(const args_t& args, const input_t& inp,
                     for (const auto& item: inp.programs) {
                         const program_t& prog = item.second;
                         L("const sg_shader_desc* {}{}_shader_desc(void);\n", mod_prefix(inp), prog.name);
+                        L("const sg_shader_refl* {}{}_refl_vs(void);\n", mod_prefix(inp), prog.name);
+                        L("const sg_shader_refl* {}{}_refl_fs(void);\n", mod_prefix(inp), prog.name);
                     }
                 }
                 write_vertex_attrs(inp, spirvcross[i]);
@@ -496,10 +601,15 @@ errmsg_t sokol_t::gen(const args_t& args, const input_t& inp,
                     L("#if defined(SOKOL_SHDC_IMPL)\n");
                 }
             }
+
             if (args.ifdef) {
                 L("#if defined({})\n", sokol_define(slang));
             }
             write_shader_sources_and_blobs(inp, spirvcross[i], bytecode[i], slang);
+            if (!reflection_written_for_backend[sokol_define(slang)]) {
+                write_reflection(inp, spirvcross[i]);
+                reflection_written_for_backend[sokol_define(slang)] = true;
+            }
             if (args.ifdef) {
                 L("#endif /* {} */\n", sokol_define(slang));
             }
